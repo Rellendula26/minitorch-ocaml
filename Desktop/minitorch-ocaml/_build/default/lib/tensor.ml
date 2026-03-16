@@ -5,6 +5,7 @@ type op =
   | Sub
   | Div
   | Relu
+  | Tanh
 
 type t = {
   mutable value : float;
@@ -67,6 +68,15 @@ let relu a =
     is_parameter = false;
   }
 
+let tanh a =
+  {
+    value = Stdlib.tanh a.value;
+    grad = 0.0;
+    op = Tanh;
+    parents = [a];
+    is_parameter = false;
+  }
+
 let topo_sort root =
   let visited = Hashtbl.create 100 in
   let topo = ref [] in
@@ -106,6 +116,9 @@ let backward root =
       | Relu, [a] ->
           let local_grad = if a.value > 0.0 then 1.0 else 0.0 in
           a.grad <- a.grad +. (local_grad *. node.grad)
+      | Tanh, [a] ->
+          let t = Stdlib.tanh a.value in
+          a.grad <- a.grad +. ((1.0 -. (t *. t)) *. node.grad)
       | _, _ -> failwith "Invalid computation graph")
     (List.rev topo)
 
@@ -128,6 +141,7 @@ let op_to_string = function
   | Sub -> "Sub"
   | Div -> "Div"
   | Relu -> "Relu"
+  | Tanh -> "Tanh"
 
 let to_string x =
   Printf.sprintf

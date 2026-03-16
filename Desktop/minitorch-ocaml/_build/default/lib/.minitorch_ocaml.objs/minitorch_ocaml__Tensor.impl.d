@@ -1,1 +1,1 @@
-lib/tensor.ml: Hashtbl List Printf
+lib/tensor.ml: Hashtbl List Printf Stdlib

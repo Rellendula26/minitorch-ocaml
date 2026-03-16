@@ -32,7 +32,7 @@ let make_neuron nin nonlin =
 let neuron_forward n xs =
   let wx_terms = List.map2 mul n.w xs in
   let act = add (sum_tensors wx_terms) n.b in
-  if n.nonlin then relu act else act
+  if n.nonlin then tanh act else act
 
 let make_layer nin nout nonlin =
   {
@@ -54,11 +54,54 @@ let mlp_forward model x =
   | [out] -> out
   | _ -> failwith "Expected one output"
 
+let neuron_parameters n =
+  n.w @ [n.b]
+
+let layer_parameters l =
+  List.flatten (List.map neuron_parameters l.neurons)
+
+let mlp_parameters m =
+  layer_parameters m.l1 @ layer_parameters m.l2
+
+let square x =
+  x *. x
+
+let activation_name n =
+  if n.nonlin then "Tanh" else "Linear"
+
+let print_layer_summary layer layer_name =
+  match layer.neurons with
+  | [] ->
+      Printf.printf "%s: 0 neurons\n" layer_name
+  | first_neuron :: _ ->
+      let num_neurons = List.length layer.neurons in
+      let activation = activation_name first_neuron in
+      let inputs_per_neuron = List.length first_neuron.w in
+      let params_in_layer = List.length (layer_parameters layer) in
+      Printf.printf "%s: %d neurons | %d input(s) each | %s | %d parameter(s)\n"
+        layer_name num_neurons inputs_per_neuron activation params_in_layer
+
+let print_mlp_summary model =
+  let total_params = List.length (mlp_parameters model) in
+  Printf.printf "MLP Summary\n";
+  print_layer_summary model.l1 "Layer 1";
+  print_layer_summary model.l2 "Layer 2";
+  Printf.printf "Total parameters: %d\n\n" total_params
+
 let () =
   Random.self_init ();
 
   let model = make_mlp () in
+  let params = mlp_parameters model in
   let lr = 0.001 in
+
+  print_mlp_summary model;
+
+  Printf.printf "Initial parameters:\n";
+  List.iteri
+    (fun i p -> Printf.printf "p%d = %.4f\n" i p.value)
+    params;
+  Printf.printf "\n";
 
   let data =
     [
@@ -68,6 +111,10 @@ let () =
       (1.0, 1.0);
       (2.0, 4.0);
     ]
+  in
+
+  let test_points =
+    [-3.0; -1.5; -0.5; 0.5; 1.5; 3.0]
   in
 
   for i = 0 to 4999 do
@@ -92,11 +139,26 @@ let () =
     step total_loss lr
   done;
 
-  Printf.printf "\nPredictions after training:\n";
+  Printf.printf "\nFinal parameters:\n";
+  List.iteri
+    (fun i p -> Printf.printf "p%d = %.4f\n" i p.value)
+    (mlp_parameters model);
+
+  Printf.printf "\nPredictions on training data:\n";
   List.iter
     (fun (x_val, y_val) ->
       let x = make x_val in
       let pred = mlp_forward model x in
       Printf.printf "x = %.1f | pred = %.4f | true = %.1f\n"
         x_val pred.value y_val)
-    data
+    data;
+
+  Printf.printf "\nGeneralization test:\n";
+  List.iter
+    (fun x_val ->
+      let x = make x_val in
+      let pred = mlp_forward model x in
+      let true_val = square x_val in
+      Printf.printf "x = %.1f | pred = %.4f | true = %.4f\n"
+        x_val pred.value true_val)
+    test_points

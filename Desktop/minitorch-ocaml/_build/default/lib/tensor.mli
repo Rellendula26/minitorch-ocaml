@@ -5,6 +5,7 @@ type op =
   | Sub
   | Div
   | Relu
+  | Tanh
 
 type t = {
   mutable value : float;
@@ -21,6 +22,7 @@ val mul : t -> t -> t
 val sub : t -> t -> t
 val div : t -> t -> t
 val relu : t -> t
+val tanh : t -> t
 val backward : t -> unit
 val zero_grad : t -> unit
 val step : t -> float -> unit
