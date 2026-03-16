@@ -1,0 +1,4 @@
+(executable
+ (public_name minitorch_ocaml)
+ (name main)
+ (libraries minitorch_ocaml))

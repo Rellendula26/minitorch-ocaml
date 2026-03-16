@@ -1,0 +1,16 @@
+# dune exec ./bin/main.exe
+# OCAMLPARAM: unset
+# Shared cache: enabled-except-user-rules
+# Shared cache location: /Users/ritvikellendula/.cache/dune/db
+# Workspace root: /Users/ritvikellendula/Desktop/minitorch-ocaml
+# Auto-detected concurrency: 8
+# Dune context:
+#  { name = "default"
+#  ; kind = "default"
+#  ; profile = Dev
+#  ; merlin = true
+#  ; fdo_target_exe = None
+#  ; build_dir = In_build_dir "default"
+#  ; instrument_with = []
+#  }
+$ /Users/ritvikellendula/.opam/default/bin/ocamlc.opt -config > /var/folders/t7/n08z2yzn0wsgdvq0tccczmg00000gn/T/dune_0d4e9a_output
