@@ -1,8 +1,0 @@
-lib: [
-  "_build/install/default/lib/minitorch_ocaml/META"
-  "_build/install/default/lib/minitorch_ocaml/dune-package"
-  "_build/install/default/lib/minitorch_ocaml/opam"
-]
-bin: [
-  "_build/install/default/bin/minitorch_ocaml"
-]

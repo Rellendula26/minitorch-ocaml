@@ -8,6 +8,7 @@ type op =
   | Tanh
 
 type t = {
+  id : int;
   mutable value : float;
   mutable grad : float;
   op : op;
@@ -25,6 +26,6 @@ val relu : t -> t
 val tanh : t -> t
 val backward : t -> unit
 val zero_grad : t -> unit
-val step : t -> float -> unit
+val step : t list -> float -> unit
 val op_to_string : op -> string
 val to_string : t -> string
