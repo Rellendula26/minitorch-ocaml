@@ -1,0 +1,5 @@
+_build/
+*.exe
+*.csv
+*.cm*
+*.o
