@@ -1,0 +1,2 @@
+(library
+ (name minitorch_ocaml))
