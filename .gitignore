@@ -1,5 +1,11 @@
 _build/
-*.exe
-*.csv
-*.cm*
+*.cmi
+*.cmo
+*.cmx
 *.o
+*.a
+*.cmxa
+*.exe
+*.install
+.merlin
+.DS_Store
