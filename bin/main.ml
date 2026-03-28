@@ -5,14 +5,10 @@ type activation =
   | ReluAct
   | LinearAct
 
-type neuron = {
-  w : t list;
-  b : t;
-  act : activation;
-}
-
 type layer = {
-  neurons : neuron list;
+  w : t;      (* shape: [nout; nin] *)
+  b : t;      (* shape: [nout; 1] *)
+  act : activation;
 }
 
 type mlp = {
@@ -49,8 +45,8 @@ type experiment_result = {
 }
 
 type adam_state = {
-  m : float array;
-  v : float array;
+  mutable m : Tensor.tensor list;
+  mutable v : Tensor.tensor list;
   beta1 : float;
   beta2 : float;
   eps : float;
@@ -71,6 +67,34 @@ let init_name = function
   | XavierInit -> "Xavier"
   | HeInit -> "He"
 
+let scalar_of_tensor x =
+  match (x.shape, x.data) with
+  | [], [| v |] -> v
+  | [1; 1], [| v |] -> v
+  | _ -> failwith "Expected scalar-like tensor"
+
+let scalar_node_value x = scalar_of_tensor x.value
+let scalar_node_grad x = scalar_of_tensor x.grad
+
+let zeros_like_tensor x =
+  { data = Array.make (Array.length x.data) 0.0; shape = x.shape }
+
+let map_tensor f x =
+  { data = Array.map f x.data; shape = x.shape }
+
+let map2_tensor f a b =
+  if a.shape <> b.shape then failwith "tensor helper: shape mismatch";
+  let n = Array.length a.data in
+  let out = Array.make n 0.0 in
+  for i = 0 to n - 1 do
+    out.(i) <- f a.data.(i) b.data.(i)
+  done;
+  { data = out; shape = a.shape }
+
+let add_tensor_local a b = map2_tensor ( +. ) a b
+let sub_tensor_local a b = map2_tensor ( -. ) a b
+let mul_scalar_tensor_local x c = map_tensor (fun v -> v *. c) x
+
 let apply_activation act x =
   match act with
   | TanhAct -> tanh x
@@ -83,45 +107,48 @@ let sum_tensors ts =
   | first :: rest -> List.fold_left add first rest
 
 let rand_uniform low high =
-  low +. (Random.float (high -. low))
+  low +. Random.float (high -. low)
 
-let make_weight ~nin ~act ~init =
+let build_matrix rows cols f =
+  let data =
+    Array.init (rows * cols) (fun idx ->
+        let r = idx / cols in
+        let c = idx mod cols in
+        f r c)
+  in
+  tensor_of_array data [rows; cols]
+
+let make_weight_matrix ~nin ~nout ~act ~init =
   match init with
   | UniformInit ->
-      parameter (rand_uniform (-1.0) 1.0)
+      parameter
+        (build_matrix nout nin (fun _ _ -> rand_uniform (-1.0) 1.0))
   | XavierInit ->
-      let bound = sqrt (6.0 /. float_of_int (nin + 1)) in
-      parameter (rand_uniform (-.bound) bound)
+      let bound = sqrt (6.0 /. float_of_int (nin + nout)) in
+      parameter
+        (build_matrix nout nin (fun _ _ -> rand_uniform (-.bound) bound))
   | HeInit ->
       let scale =
         match act with
         | ReluAct -> sqrt (2.0 /. float_of_int nin)
         | _ -> sqrt (1.0 /. float_of_int nin)
       in
-      parameter (rand_uniform (-.scale) scale)
+      parameter
+        (build_matrix nout nin (fun _ _ -> rand_uniform (-.scale) scale))
 
-let make_bias () =
-  parameter 0.0
-
-let make_neuron nin act init =
-  {
-    w = List.init nin (fun _ -> make_weight ~nin ~act ~init);
-    b = make_bias ();
-    act;
-  }
-
-let neuron_forward n xs =
-  let wx_terms = List.map2 mul n.w xs in
-  let preact = add (sum_tensors wx_terms) n.b in
-  apply_activation n.act preact
+let make_bias_vector nout =
+  parameter (build_matrix nout 1 (fun _ _ -> 0.0))
 
 let make_layer nin nout act init =
   {
-    neurons = List.init nout (fun _ -> make_neuron nin act init);
+    w = make_weight_matrix ~nin ~nout ~act ~init;
+    b = make_bias_vector nout;
+    act;
   }
 
-let layer_forward layer xs =
-  List.map (fun n -> neuron_forward n xs) layer.neurons
+let layer_forward layer x =
+  let z = add (matmul layer.w x) layer.b in
+  apply_activation layer.act z
 
 let rec pairwise xs =
   match xs with
@@ -144,46 +171,41 @@ let make_mlp dims hidden_act output_act init =
       { layers }
 
 let mlp_forward model x =
-  let outputs =
-    List.fold_left
-      (fun xs layer -> layer_forward layer xs)
-      [x]
-      model.layers
-  in
-  match outputs with
-  | [out] -> out
-  | _ -> failwith "Expected exactly one output"
+  List.fold_left
+    (fun acc layer -> layer_forward layer acc)
+    x
+    model.layers
 
-let neuron_parameters n =
-  n.w @ [n.b]
-
-let layer_parameters l =
-  List.flatten (List.map neuron_parameters l.neurons)
+let layer_parameters l = [l.w; l.b]
 
 let mlp_parameters m =
   List.flatten (List.map layer_parameters m.layers)
 
 let zero_param_grads params =
-  List.iter (fun p -> p.grad <- 0.0) params
+  List.iter (fun p -> p.grad <- zeros (shape p.value)) params
 
 let l2_penalty params =
   let penalties =
     List.filter (fun p -> p.is_parameter) params
-    |> List.map (fun p -> make (p.value *. p.value))
+    |> List.map square
+    |> List.map sum
   in
   match penalties with
-  | [] -> make 0.0
+  | [] -> of_float 0.0
   | _ -> sum_tensors penalties
+
+let col_vector_of_scalar x =
+  of_matrix [[x]]
 
 let loss_on_data ?(weight_decay = 0.0) model data =
   let losses =
     List.map
       (fun (x_val, y_val) ->
-        let x = make x_val in
-        let y_true = make y_val in
+        let x = col_vector_of_scalar x_val in
+        let y_true = col_vector_of_scalar y_val in
         let pred = mlp_forward model x in
         let diff = sub pred y_true in
-        mul diff diff)
+        sum (square diff))
       data
   in
   let data_loss = sum_tensors losses in
@@ -191,11 +213,12 @@ let loss_on_data ?(weight_decay = 0.0) model data =
   else
     let params = mlp_parameters model in
     let reg = l2_penalty params in
-    add data_loss (mul (make weight_decay) reg)
+    add data_loss (mulf reg weight_decay)
 
 let predict model x_val =
-  let x = make x_val in
-  (mlp_forward model x).value
+  let x = col_vector_of_scalar x_val in
+  let y = mlp_forward model x in
+  scalar_node_value y
 
 let mae_on_data model data =
   let errs =
@@ -208,41 +231,52 @@ let mae_on_data model data =
   total /. float_of_int (List.length errs)
 
 let print_layer_summary idx layer =
-  match layer.neurons with
-  | [] ->
-      Printf.printf "Layer %d: 0 neurons\n" (idx + 1)
-  | first_neuron :: _ ->
-      let num_neurons = List.length layer.neurons in
-      let act = activation_name first_neuron.act in
-      let inputs_per_neuron = List.length first_neuron.w in
-      let params_in_layer = List.length (layer_parameters layer) in
-      Printf.printf
-        "Layer %d: %d neurons | %d input(s) each | %s | %d parameter(s)\n"
-        (idx + 1)
-        num_neurons
-        inputs_per_neuron
-        act
-        params_in_layer
+  let rows, cols =
+    match layer.w.value.shape with
+    | [r; c] -> (r, c)
+    | _ -> failwith "Expected rank-2 weight matrix"
+  in
+  let bias_params = Array.length layer.b.value.data in
+  let weight_params = Array.length layer.w.value.data in
+  Printf.printf
+    "Layer %d: W[%d x %d] | b[%d x 1] | %s | %d parameter(s)\n"
+    (idx + 1)
+    rows
+    cols
+    rows
+    (activation_name layer.act)
+    (weight_params + bias_params)
 
 let print_mlp_summary model =
-  let total_params = List.length (mlp_parameters model) in
-  Printf.printf "MLP Summary\n";
+  let total_params =
+    mlp_parameters model
+    |> List.fold_left (fun acc p -> acc + Array.length p.value.data) 0
+  in
+  Printf.printf "Vectorized MLP Summary\n";
   List.iteri print_layer_summary model.layers;
   Printf.printf "Total parameters: %d\n\n" total_params
 
 let print_tensor label x =
-  Printf.printf "%s -> value = %.6f | grad = %.6f\n" label x.value x.grad
+  Printf.printf "%s -> value = %s | grad = %s\n"
+    label
+    (tensor_to_string x.value)
+    (tensor_to_string x.grad)
 
 let demo_new_ops () =
-  Printf.printf "\n=== Primitive op showcase: exp / log / pow / sigmoid ===\n";
+  Printf.printf "\n=== Primitive op showcase: exp / log / pow / sigmoid / matmul ===\n";
 
-  let x = make 2.0 in
-  let y = make 3.0 in
+  let x = of_matrix [[2.0]] in
+  let y = of_matrix [[3.0]] in
 
   let exp_x = exp x in
   let log_y = log y in
   let x_sq = pow x 2.0 in
   let sig_x = sigmoid x in
+  let mm =
+    matmul
+      (of_matrix [[1.0; 2.0]; [3.0; 4.0]])
+      (of_matrix [[5.0]; [6.0]])
+  in
 
   print_tensor "x" x;
   print_tensor "y" y;
@@ -250,11 +284,9 @@ let demo_new_ops () =
   print_tensor "log(y)" log_y;
   print_tensor "pow(x, 2.0)" x_sq;
   print_tensor "sigmoid(x)" sig_x;
+  print_tensor "matmul demo" mm;
 
-  Printf.printf "\nComposite scalar expression:\n";
-  Printf.printf "f(x, y) = sigmoid((x^2 + exp(y)) / log(y + 1))\n";
-
-  let y_plus_one = add y (make 1.0) in
+  let y_plus_one = add y (of_matrix [[1.0]]) in
   let numerator = add (pow x 2.0) (exp y) in
   let denominator = log y_plus_one in
   let quotient = div numerator denominator in
@@ -267,35 +299,49 @@ let demo_new_ops () =
   print_tensor "y after backward" y;
   Printf.printf "\n"
 
-let gradient_check ?(eps = 1e-5) ?(num_to_check = 6) ?(weight_decay = 0.0) model data =
+let gradient_check
+    ?(eps = 1e-5)
+    ?(num_to_check = 8)
+    ?(weight_decay = 0.0)
+    model
+    data =
   let params = mlp_parameters model in
 
   zero_param_grads params;
   let loss = loss_on_data ~weight_decay model data in
   backward loss;
 
-  let analytical = List.map (fun p -> p.grad) params in
-  let n = min num_to_check (List.length params) in
+  let entries =
+    params
+    |> List.mapi (fun pi p ->
+           Array.to_list
+             (Array.mapi (fun idx _ -> (pi, p, idx)) p.value.data))
+    |> List.flatten
+  in
 
-  Printf.printf "Gradient check (first %d parameter(s), eps = %.1e)\n" n eps;
+  let n = min num_to_check (List.length entries) in
+
+  Printf.printf
+    "Gradient check (first %d scalar parameter(s), eps = %.1e)\n"
+    n eps;
 
   let max_abs_err = ref 0.0 in
   let max_rel_err = ref 0.0 in
 
   for i = 0 to n - 1 do
-    let p = List.nth params i in
-    let orig = p.value in
+    let (pi, p, idx) = List.nth entries i in
+    let orig = p.value.data.(idx) in
+    let analytical_i = p.grad.data.(idx) in
 
-    p.value <- orig +. eps;
-    let loss_plus = (loss_on_data ~weight_decay model data).value in
+    p.value.data.(idx) <- orig +. eps;
+    let loss_plus = scalar_node_value (loss_on_data ~weight_decay model data) in
 
-    p.value <- orig -. eps;
-    let loss_minus = (loss_on_data ~weight_decay model data).value in
+    p.value.data.(idx) <- orig -. eps;
+    let loss_minus = scalar_node_value (loss_on_data ~weight_decay model data) in
 
-    p.value <- orig;
+    p.value.data.(idx) <- orig;
 
     let numerical = (loss_plus -. loss_minus) /. (2.0 *. eps) in
-    let analytical_i = List.nth analytical i in
     let abs_err = abs_float (numerical -. analytical_i) in
     let denom =
       max 1e-12 (max (abs_float numerical) (abs_float analytical_i))
@@ -306,8 +352,8 @@ let gradient_check ?(eps = 1e-5) ?(num_to_check = 6) ?(weight_decay = 0.0) model
     if rel_err > !max_rel_err then max_rel_err := rel_err;
 
     Printf.printf
-      "p%d | analytical = %.8f | numerical = %.8f | abs err = %.3e | rel err = %.3e\n"
-      i analytical_i numerical abs_err rel_err
+      "param%d[%d] | analytical = %.8f | numerical = %.8f | abs err = %.3e | rel err = %.3e\n"
+      pi idx analytical_i numerical abs_err rel_err
   done;
 
   Printf.printf
@@ -315,10 +361,9 @@ let gradient_check ?(eps = 1e-5) ?(num_to_check = 6) ?(weight_decay = 0.0) model
     !max_abs_err !max_rel_err
 
 let make_adam_state params =
-  let n = List.length params in
   {
-    m = Array.make n 0.0;
-    v = Array.make n 0.0;
+    m = List.map (fun p -> zeros_like_tensor p.value) params;
+    v = List.map (fun p -> zeros_like_tensor p.value) params;
     beta1 = 0.9;
     beta2 = 0.999;
     eps = 1e-8;
@@ -328,7 +373,9 @@ let make_adam_state params =
 let grad_global_norm params =
   let sq_sum =
     List.fold_left
-      (fun acc p -> acc +. (p.grad *. p.grad))
+      (fun acc p ->
+        acc +.
+        Array.fold_left (fun s g -> s +. (g *. g)) 0.0 p.grad.data)
       0.0
       params
   in
@@ -340,7 +387,10 @@ let clip_grad_norm params max_norm =
     let norm = grad_global_norm params in
     if norm > max_norm then
       let scale = max_norm /. (norm +. 1e-12) in
-      List.iter (fun p -> p.grad <- p.grad *. scale) params
+      List.iter
+        (fun p ->
+          p.grad <- mul_scalar_tensor_local p.grad scale)
+        params
 
 let current_lr schedule base_lr iter =
   match schedule with
@@ -353,7 +403,7 @@ let sgd_step params lr =
   List.iter
     (fun p ->
       if p.is_parameter then
-        p.value <- p.value -. (lr *. p.grad))
+        p.value <- sub_tensor_local p.value (mul_scalar_tensor_local p.grad lr))
     params
 
 let adam_step params state lr =
@@ -364,13 +414,42 @@ let adam_step params state lr =
     (fun i p ->
       if p.is_parameter then begin
         let g = p.grad in
-        state.m.(i) <- (state.beta1 *. state.m.(i)) +. ((1.0 -. state.beta1) *. g);
-        state.v.(i) <- (state.beta2 *. state.v.(i)) +. ((1.0 -. state.beta2) *. g *. g);
 
-        let m_hat = state.m.(i) /. (1.0 -. (state.beta1 ** t_float)) in
-        let v_hat = state.v.(i) /. (1.0 -. (state.beta2 ** t_float)) in
+        let m_i =
+          add_tensor_local
+            (mul_scalar_tensor_local (List.nth state.m i) state.beta1)
+            (mul_scalar_tensor_local g (1.0 -. state.beta1))
+        in
 
-        p.value <- p.value -. (lr *. m_hat /. (sqrt v_hat +. state.eps))
+        let v_i =
+          add_tensor_local
+            (mul_scalar_tensor_local (List.nth state.v i) state.beta2)
+            (mul_scalar_tensor_local
+               (map_tensor (fun x -> x *. x) g)
+               (1.0 -. state.beta2))
+        in
+
+        state.m <- List.mapi (fun j x -> if i = j then m_i else x) state.m;
+        state.v <- List.mapi (fun j x -> if i = j then v_i else x) state.v;
+
+        let m_hat =
+          mul_scalar_tensor_local
+            m_i
+            (1.0 /. (1.0 -. (state.beta1 ** t_float)))
+        in
+
+        let v_hat =
+          mul_scalar_tensor_local
+            v_i
+            (1.0 /. (1.0 -. (state.beta2 ** t_float)))
+        in
+
+        let denom = map_tensor (fun x -> sqrt x +. state.eps) v_hat in
+        let step_tensor =
+          map2_tensor (fun m d -> lr *. m /. d) m_hat denom
+        in
+
+        p.value <- sub_tensor_local p.value step_tensor
       end)
     params
 
@@ -415,7 +494,8 @@ let train_model
 
   if verbose then begin
     Printf.printf "\n=== %s ===\n" name;
-    Printf.printf "optimizer = %s | init = %s | weight_decay = %.6f | grad_clip = %.4f\n"
+    Printf.printf
+      "optimizer = %s | init = %s | weight_decay = %.6f | grad_clip = %.4f\n"
       (optimizer_name optimizer)
       (init_name init)
       weight_decay
@@ -432,11 +512,12 @@ let train_model
     clip_grad_norm params grad_clip;
 
     let lr_now = current_lr schedule lr i in
+    let loss_scalar = scalar_node_value total_loss in
 
     if verbose && i mod print_every = 0 then
       Printf.printf
         "iter %d | lr = %.6f | loss = %.6f | grad_norm = %.6f\n"
-        i lr_now total_loss.value grad_norm_before;
+        i lr_now loss_scalar grad_norm_before;
 
     begin
       match optimizer with
@@ -451,7 +532,8 @@ let train_model
           if i mod print_every = 0 || i = iters - 1 then
             let train_mae = mae_on_data model data in
             let test_mae = mae_on_data model test_data in
-            append_csv_row oc i lr_now total_loss.value train_mae test_mae grad_norm_before
+            append_csv_row
+              oc i lr_now loss_scalar train_mae test_mae grad_norm_before
     end
   done;
 
@@ -461,7 +543,7 @@ let train_model
     | Some oc -> close_out oc
   end;
 
-  let final_loss = (loss_on_data ~weight_decay model data).value in
+  let final_loss = scalar_node_value (loss_on_data ~weight_decay model data) in
   let mae_train = mae_on_data model data in
   let mae_test = mae_on_data model test_data in
   let pred_neg3 = predict model (-3.0) in
@@ -574,9 +656,10 @@ let () =
   let showcase_model = make_mlp [1; 8; 8; 1] TanhAct LinearAct XavierInit in
   print_mlp_summary showcase_model;
 
-  Printf.printf "Initial parameters:\n";
+  Printf.printf "Initial parameter shapes:\n";
   List.iteri
-    (fun i p -> Printf.printf "p%d = %.4f\n" i p.value)
+    (fun i p ->
+      Printf.printf "p%d shape = %s\n" i (tensor_to_string p.value))
     (mlp_parameters showcase_model);
   Printf.printf "\n";
 
@@ -613,7 +696,7 @@ let () =
   in
 
   add_result
-    "8x8_tanh_sgd"
+    "8x8_tanh_sgd_vec"
     [1; 8; 8; 1]
     TanhAct
     SGD
@@ -628,42 +711,13 @@ let () =
     ~grad_clip:5.0
     ~schedule:(StepDecay { step_size = 1000; gamma = 0.5 })
     ~log_csv:true
-    "8x8_tanh_adam"
+    "8x8_tanh_adam_vec"
     [1; 8; 8; 1]
     TanhAct
     Adam
     XavierInit
     0.01
     2500
-    false
-    train_data;
-
-  add_result
-    ~weight_decay:0.0005
-    ~grad_clip:5.0
-    ~schedule:(StepDecay { step_size = 1000; gamma = 0.5 })
-    ~log_csv:true
-    "8x8_relu_adam"
-    [1; 8; 8; 1]
-    ReluAct
-    Adam
-    HeInit
-    0.005
-    2500
-    false
-    train_data;
-
-  add_result
-    ~weight_decay:0.0005
-    ~grad_clip:5.0
-    ~log_csv:true
-    "4x4_tanh_adam"
-    [1; 4; 4; 1]
-    TanhAct
-    Adam
-    XavierInit
-    0.01
-    2000
     false
     train_data;
 
@@ -672,7 +726,7 @@ let () =
     ~grad_clip:5.0
     ~schedule:(StepDecay { step_size = 1000; gamma = 0.5 })
     ~log_csv:true
-    "8x8_tanh_adam_expanded"
+    "8x8_tanh_adam_vec_expanded"
     [1; 8; 8; 1]
     TanhAct
     Adam

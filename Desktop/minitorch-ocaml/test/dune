@@ -1,3 +1,0 @@
-(test
- (name test_minitorch_ocaml)
- (libraries minitorch_ocaml))
